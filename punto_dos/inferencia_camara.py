@@ -8,9 +8,12 @@ from sklearn.preprocessing import LabelEncoder
 os.environ["KERAS_BACKEND"] = "torch"
 import keras
 
-print("Cargando modelo...")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(SCRIPT_DIR, "modelo_punto2.keras")
+
+print(f"Cargando modelo desde {MODEL_PATH}...")
 try:
-    model = keras.models.load_model('modelo_punto2.keras')
+    model = keras.models.load_model(MODEL_PATH)
     print("Modelo cargado exitosamente.")
 except Exception as e:
     print("Error al cargar el modelo. ¿Ya se terminó de entrenar?")
