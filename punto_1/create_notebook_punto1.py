@@ -457,11 +457,34 @@ error fue mas alto o mas bajo y por que:
    entre periodos, lo que sugiere que el factor dominante en el error es
    la volatilidad del periodo evaluado, no la arquitectura en si - visible
    en el analisis de errores por regimen de volatilidad de la seccion 9.
-3. **Splits cronologicos son indispensables.** Un split aleatorio 70/30
+3. **La brecha dev-test (no train-dev) es la que realmente delata el
+   cambio de regimen entre el tramo de entrenamiento y el periodo
+   evaluado, y hay que leerla con cuidado.** En 2020 (COVID) y 2022
+   (bajista + split), el RMSE de dev salio mas bajo que el de test por un
+   margen grande (dev=0.96 vs test=8.64 en 2020; dev=2.72 vs test=5.33 en
+   2022), mientras que en 2024 (recuperacion) la brecha fue pequena
+   (dev=2.48 vs test=3.31) y en 2019 (calmo) el test incluso salio mejor
+   que el dev (dev=3.07 vs test=2.17). La causa es que el dev set,
+   definido como el ultimo 10% cronologico dentro del tramo de
+   entrenamiento, cae en el regimen de mercado inmediatamente anterior al
+   periodo de test, no necesariamente en el mismo regimen: para 2020, el
+   train termina el 2019-12-31 y el dev queda en la cola calma de 2019,
+   mientras que el test cubre todo 2020 incluido el desplome de marzo por
+   la pandemia; para 2022 pasa algo simetrico (dev en la cola alcista de
+   2021, test en el ano bajista con el split accionario de AMZN). Esto es
+   exactamente la advertencia de los capitulos 5-7 del libro guia: el dev
+   set debe reflejar la distribucion que se va a enfrentar en el futuro
+   (representada aqui por el test), y este resultado muestra que, en
+   series de tiempo financieras con cambios de regimen abruptos, un split
+   cronologico bien construido no garantiza esa correspondencia por si
+   solo. El tamano de la brecha dev-test rastrea justamente cuanto cambio
+   el regimen de mercado entre el tramo final de entrenamiento y el
+   periodo evaluado.
+4. **Splits cronologicos son indispensables.** Un split aleatorio 70/30
    habria inflado artificialmente el desempeno reportado, al dejar que el
    modelo "viera" tendencias del futuro durante el entrenamiento - el
    error de diseno que los capitulos 5-6 advierten evitar.
-4. **Limitacion de la red densa (misma que en el punto 2).** Al no tener
+5. **Limitacion de la red densa (misma que en el punto 2).** Al no tener
    memoria secuencial (a diferencia de una LSTM) ni convoluciones, la red
    densa trata cada ventana como un vector independiente; esto simplifica
    el diseno pero probablemente deja desempeno sobre la mesa frente a
