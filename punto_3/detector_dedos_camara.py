@@ -13,7 +13,7 @@ KERAS_PATH = os.path.join(SCRIPT_DIR, "modelo_punto3.keras")
 
 
 def cargar_modelo():
-    """Carga y evalúa el modelo directamente desde 'modelo_punto3.keras' usando álgebra lineal optimizada."""
+    """Carga y evalúa dinámicamente cualquier arquitectura Dense+BN desde 'modelo_punto3.keras' (Modelo 2 o Modelo 3)."""
     if not os.path.exists(KERAS_PATH):
         print(f"Error: No se encontró el archivo del modelo en '{KERAS_PATH}'.")
         exit(1)
@@ -24,54 +24,58 @@ def cargar_modelo():
 
         with h5py.File(io.BytesIO(weights_bytes), 'r') as f:
             layers = f['layers']
-            W0 = layers['dense']['vars']['0'][()].astype(np.float32)
-            b0 = layers['dense']['vars']['1'][()].astype(np.float32)
+            dense_list = []
+            for k in layers.keys():
+                if 'dense' in k and 'vars' in layers[k] and '0' in layers[k]['vars']:
+                    W = layers[k]['vars']['0'][()].astype(np.float32)
+                    b = layers[k]['vars']['1'][()].astype(np.float32)
+                    dense_list.append((W, b, k))
 
-            bn0_g = layers['batch_normalization']['vars']['0'][()].astype(np.float32)
-            bn0_b = layers['batch_normalization']['vars']['1'][()].astype(np.float32)
-            bn0_m = layers['batch_normalization']['vars']['2'][()].astype(np.float32)
-            bn0_v = layers['batch_normalization']['vars']['3'][()].astype(np.float32)
+            bn_list = []
+            for k in layers.keys():
+                if 'batch_normalization' in k and 'vars' in layers[k] and '0' in layers[k]['vars']:
+                    g = layers[k]['vars']['0'][()].astype(np.float32)
+                    beta = layers[k]['vars']['1'][()].astype(np.float32)
+                    m = layers[k]['vars']['2'][()].astype(np.float32)
+                    v = layers[k]['vars']['3'][()].astype(np.float32)
+                    bn_list.append((g, beta, m, v, k))
 
-            W1 = layers['dense_1']['vars']['0'][()].astype(np.float32)
-            b1 = layers['dense_1']['vars']['1'][()].astype(np.float32)
+        stages = []
+        curr_dim = 4096
+        remaining_dense = dense_list.copy()
 
-            bn1_g = layers['batch_normalization_1']['vars']['0'][()].astype(np.float32)
-            bn1_b = layers['batch_normalization_1']['vars']['1'][()].astype(np.float32)
-            bn1_m = layers['batch_normalization_1']['vars']['2'][()].astype(np.float32)
-            bn1_v = layers['batch_normalization_1']['vars']['3'][()].astype(np.float32)
-
-            W2 = layers['dense_2']['vars']['0'][()].astype(np.float32)
-            b2 = layers['dense_2']['vars']['1'][()].astype(np.float32)
-
-            bn2_g = layers['batch_normalization_2']['vars']['0'][()].astype(np.float32)
-            bn2_b = layers['batch_normalization_2']['vars']['1'][()].astype(np.float32)
-            bn2_m = layers['batch_normalization_2']['vars']['2'][()].astype(np.float32)
-            bn2_v = layers['batch_normalization_2']['vars']['3'][()].astype(np.float32)
-
-            W3 = layers['dense_3']['vars']['0'][()].astype(np.float32)
-            b3 = layers['dense_3']['vars']['1'][()].astype(np.float32)
-
-            W4 = layers['dense_4']['vars']['0'][()].astype(np.float32)
-            b4 = layers['dense_4']['vars']['1'][()].astype(np.float32)
+        while remaining_dense:
+            found = False
+            for i, (W, b, k) in enumerate(remaining_dense):
+                if W.shape[0] == curr_dim:
+                    found = True
+                    out_dim = W.shape[1]
+                    matching_bn = None
+                    for bn in bn_list:
+                        if bn[0].shape[0] == out_dim:
+                            matching_bn = bn
+                            break
+                    stages.append((W, b, matching_bn))
+                    curr_dim = out_dim
+                    remaining_dense.pop(i)
+                    break
+            if not found:
+                break
 
         def predecir_keras(x_input):
-            h = np.maximum(0.0, np.dot(x_input, W0) + b0)
-            h = bn0_g * (h - bn0_m) / np.sqrt(bn0_v + 1e-3) + bn0_b
-            h = np.maximum(0.0, h)
+            h = x_input
+            for i, (W, b, bn) in enumerate(stages):
+                z = np.dot(h, W) + b
+                if i == len(stages) - 1:
+                    return (1.0 / (1.0 + np.exp(-np.clip(z, -25.0, 25.0))))[0]
+                else:
+                    h = np.maximum(0.0, z)
+                    if bn is not None:
+                        g, beta, m, v, _ = bn
+                        h = g * (h - m) / np.sqrt(v + 1e-3) + beta
+                        h = np.maximum(0.0, h)
 
-            h = np.maximum(0.0, np.dot(h, W1) + b1)
-            h = bn1_g * (h - bn1_m) / np.sqrt(bn1_v + 1e-3) + bn1_b
-            h = np.maximum(0.0, h)
-
-            h = np.maximum(0.0, np.dot(h, W2) + b2)
-            h = bn2_g * (h - bn2_m) / np.sqrt(bn2_v + 1e-3) + bn2_b
-            h = np.maximum(0.0, h)
-
-            h = np.maximum(0.0, np.dot(h, W3) + b3)
-            z = np.dot(h, W4) + b4
-            return (1.0 / (1.0 + np.exp(-np.clip(z, -25.0, 25.0))))[0]
-
-        print(f"Modelo '.keras' cargado exitosamente desde '{KERAS_PATH}'.")
+        print(f"Modelo '.keras' cargado exitosamente ({len(stages)} capas) desde '{KERAS_PATH}'.")
         return predecir_keras
     except Exception as e:
         print(f"Error al leer '{KERAS_PATH}': {e}")
