@@ -19,3 +19,8 @@ __pycache__/
 
 # PDF book (large binary)
 *.pdf
+
+# Notebooks temporales/ejecutados
+_exec_fast.ipynb
+*_EJECUTADO.ipynb
+

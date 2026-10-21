@@ -1,0 +1,15 @@
+# Dependencias del Parcial 2 (Deep Learning)
+# Python 3.11 o 3.12 recomendado (TensorFlow no soporta 3.14).
+tensorflow>=2.16
+keras>=3.3
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+seaborn>=0.13
+scikit-learn>=1.3
+Pillow>=10.0
+opencv-python>=4.9
+kagglehub>=0.3
+jupyter
+nbconvert
+nbformat
