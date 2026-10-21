@@ -16,6 +16,10 @@ Prácticas del libro de Andrew Ng aplicadas:
   - ajuste de hiperparámetros sobre dev
   - análisis de errores sobre test
 
+Dataset: estructura PLANA (sin subcarpetas por clase).
+  Train_Dataset/images/adapter_plate_triangular000000.jpg
+  La clase se extrae del nombre del archivo (quitar dígitos finales).
+
 Uso:
     python build_notebook.py
 Genera: Parcial2_Deep_Learning.ipynb
@@ -60,12 +64,25 @@ md(
 # Parcial 2 — Deep Learning
 ## Clasificación de imágenes industriales: transfer learning vs. red desde cero
 
-**Curso:** Deep Learning (CC-IA-04)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/)
+
+**Instrucciones para correr en la web de Colab o Kaggle:**
+
+1. `Runtime > Change runtime type > T4 GPU` (o L4 si tienes Colab Pro).
+2. En Colab: panel izquierdo → ícono de la **llave (Secrets)** → agregar `KAGGLE_API_TOKEN` con tu token `KGAT_...` y activar "Notebook access".
+   En Kaggle: el dataset se monta automáticamente en `/kaggle/input/`.
+3. `Runtime > Run all` (o ejecutar celda por celda).
+4. Los checkpoints y resultados se guardan en `/kaggle/working/out` (Kaggle) o Google Drive (Colab).
+
 **Integrantes:** J. A. García Romero · S. J. Rodríguez Gutiérrez · C. A. Díaz García
 
 **Dataset:** [Industrial Dataset](https://www.kaggle.com/datasets/beschue/industrial-classification-data-set)
 (MVTec ITODD renderizado con SynthiCAD). 10 clases de piezas industriales,
 100 000 imágenes RGB de 224×224, repartidas en 70 000 train / 10 000 valid / 20 000 test.
+
+> **Nota sobre la estructura:** el dataset tiene las imágenes en carpetas planas
+> (`Train_Dataset/images/adapter_plate_triangular000000.jpg`). La clase se extrae
+> del nombre del archivo (se quitan los dígitos finales).
 
 ### Objetivo
 
@@ -98,7 +115,38 @@ md(
 ## 0. Configuración, reproducibilidad y entorno
 
 Fijamos semillas, activamos precisión mixta (la T4 de Colab lo agradece) y definimos
-las rutas de trabajo. Los artefactos se guardan en Drive para sobrevivir a una desconexión.
+las rutas de trabajo. Los artefactos se guardan en la carpeta de salida para sobrevivir
+a una desconexión.
+"""
+)
+
+code(
+    r"""
+# ============================================================
+# 0.0 Verificación de entorno (Colab / Kaggle web)
+# ============================================================
+import importlib, subprocess, sys
+
+for pkg in ["kagglehub", "tensorflow", "keras"]:
+    try:
+        importlib.import_module(pkg)
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
+
+import tensorflow as tf
+gpus = tf.config.list_physical_devices("GPU")
+print("GPUs disponibles:", gpus)
+if not gpus:
+    print("ADVERTENCIA: no hay GPU. En Colab: Runtime > Change runtime type > T4 GPU.")
+else:
+    print("GPU OK:", tf.config.experimental.get_device_details(gpus[0]).get("device_name"))
+
+# Detectar entorno
+from pathlib import Path
+if Path("/kaggle/input").exists():
+    print("Entorno: Kaggle")
+else:
+    print("Entorno: Colab / local")
 """
 )
 
@@ -136,20 +184,12 @@ np.random.seed(SEED)
 tf.random.set_seed(SEED)
 keras.utils.set_random_seed(SEED)
 
-# Precisión mixta: acelera el entrenamiento en GPU sin cambiar el resultado numérico
-# de forma apreciable. La capa final de cada modelo se declara en float32.
 keras.mixed_precision.set_global_policy("mixed_float16")
 
 print("Python     :", sys.version.split()[0])
 print("TensorFlow :", tf.__version__)
 print("Keras      :", keras.__version__)
 print("Política   :", keras.mixed_precision.global_policy().name)
-
-gpus = tf.config.list_physical_devices("GPU")
-if gpus:
-    print("GPU        :", tf.config.experimental.get_device_details(gpus[0]).get("device_name"))
-else:
-    print("GPU        : NINGUNA -- el entrenamiento será lento (Runtime > Change runtime type > T4 GPU)")
 """
 )
 
@@ -158,24 +198,25 @@ code(
 # ============================================================
 # Parámetros globales del experimento
 # ============================================================
-IMG_SIZE   = 224          # resolución nativa del dataset
+IMG_SIZE   = 224
 BATCH_SIZE = 64
 NUM_CLASSES = 10
 
-EPOCHS_TUNING = 3         # épocas por configuración en la búsqueda de hiperparámetros
-EPOCHS_VGG    = 10        # cabeza sobre VGG16 congelado
-EPOCHS_FT     = 3         # fine-tuning del último bloque de VGG16
+EPOCHS_TUNING = 3
+EPOCHS_VGG    = 10
+EPOCHS_FT     = 3
 EPOCHS_RESNET = 10
-EPOCHS_CNN    = 15        # CNN desde cero
+EPOCHS_CNN    = 15
 
-TUNING_FRAC = 0.20        # fracción de train usada en la búsqueda de hiperparámetros
-RUN_TUNING  = True        # poner False para saltar la búsqueda
-RUN_LEARNING_CURVE = True # curvas de aprendizaje (sesgo/varianza)
+TUNING_FRAC = 0.20
+RUN_TUNING  = True
+RUN_LEARNING_CURVE = True
 
-FAST_DEV_RUN = False      # True = corre todo con un subconjunto mínimo (para probar el pipeline)
+FAST_DEV_RUN = False
 FAST_FRAC    = 0.05
 
-USE_DRIVE = True          # guardar checkpoints y resultados en Google Drive
+# Error óptimo asumido (human-level) para estas piezas: ~0 %
+OPTIMAL_ERROR_RATE = 0.0
 
 AUTOTUNE = tf.data.AUTOTUNE
 
@@ -187,18 +228,26 @@ print("FAST_DEV_RUN =", FAST_DEV_RUN)
 code(
     r"""
 # ============================================================
-# Directorio de salida (Drive si está disponible)
+# Directorio de salida
 # ============================================================
-OUT_DIR = Path("/content/out")
+from pathlib import Path
 
-if USE_DRIVE:
+if Path("/kaggle/input").exists():
+    OUT_DIR = Path("/kaggle/working/out")
+    print("Entorno Kaggle: salida en", OUT_DIR)
+elif Path("data/DataSet").exists():
+    OUT_DIR = Path("out")
+    print("Entorno local: salida en", OUT_DIR.resolve())
+else:
+    OUT_DIR = Path("/content/out")
     try:
         from google.colab import drive
         drive.mount("/content/drive")
         OUT_DIR = Path("/content/drive/MyDrive/Parcial2_DL")
-        print("Drive montado.")
+        print("Drive montado:", OUT_DIR)
     except Exception as exc:
-        print("No se pudo montar Drive (¿no estás en Colab?):", exc)
+        print("No se pudo montar Drive:", exc)
+        OUT_DIR = Path("/content/out")
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 print("Artefactos ->", OUT_DIR)
@@ -212,181 +261,79 @@ md(
     r"""
 ## 1. Obtención del dataset
 
-El dataset vive en Kaggle y requiere autenticación. La celda resuelve las credenciales en
-este orden:
+El dataset tiene una estructura **plana**: las imágenes están en `Train_Dataset/images/`
+sin subcarpetas por clase. La clase se extrae del nombre del archivo
+(`adapter_plate_triangular000000.jpg` → "adapter plate triangular").
 
-1. **Secretos de Colab** (`KAGGLE_USERNAME` y `KAGGLE_KEY`): la forma recomendada, porque
-   las claves nunca quedan escritas en el notebook.
-2. Archivo `~/.kaggle/kaggle.json` si ya existe en el runtime.
-3. Diálogo de subida (solo en la interfaz web de Colab).
-
-Con las credenciales listas descarga con `kagglehub` y, si falla, cae al CLI de Kaggle;
-después detecta automáticamente las carpetas `train` / `valid` / `test`.
-
-> **Cómo obtener las credenciales:** Kaggle → foto de perfil → *Settings* → sección *API* →
-> *Create New Token*. Se descarga `kaggle.json`, que contiene `username` y `key`.
-> En Colab se guardan como secretos con el botón de la llave del panel izquierdo
-> (nombres exactos: `KAGGLE_USERNAME` y `KAGGLE_KEY`) y se activa el acceso para este notebook.
+En Kaggle el dataset se monta automáticamente en `/kaggle/input/`.
+En Colab se descarga con `kagglehub` usando el secreto `KAGGLE_API_TOKEN`.
 """
 )
 
 code(
     r"""
 # ============================================================
-# 1. Descarga y localización del dataset
+# 1. Rutas y carga del dataset (estructura plana)
 # ============================================================
-KAGGLE_DATASET = "beschue/industrial-classification-data-set"
-DATA_ROOT = Path("/content/data")
+import os, re
+from pathlib import Path
+
+if Path("/kaggle/input").exists():
+    DATA_ROOT = Path("/kaggle/input/industrial-classification-data-set/DataSet")
+    print("Dataset en Kaggle:", DATA_ROOT)
+elif Path("data/DataSet").exists():
+    DATA_ROOT = Path("data/DataSet")
+    print("Dataset local encontrado:", DATA_ROOT.resolve())
+else:
+    import kagglehub
+    src = Path(kagglehub.dataset_download("beschue/industrial-classification-data-set"))
+    DATA_ROOT = src / "DataSet"
+    print("Dataset descargado en:", DATA_ROOT)
+
+SPLITS = {"train": "Train_Dataset", "valid": "Valid_Dataset", "test": "Test_Dataset"}
+
+# Clases del dataset (orden alfabético)
+CLASS_NAMES = [
+    "adapter plate triangular",
+    "bracket big",
+    "clamp small",
+    "engine part cooler round",
+    "engine part cooler square",
+    "injection pump",
+    "screw",
+    "star",
+    "tee connector",
+    "thread",
+]
+NUM_CLASSES = len(CLASS_NAMES)
+CLASS_MAP = {cn.replace(" ", "_"): i for i, cn in enumerate(CLASS_NAMES)}
 
 
-def ensure_kaggle_credentials() -> bool:
-    # Orden de preferencia:
-    #   1) Secretos de Colab (KAGGLE_USERNAME / KAGGLE_KEY) -> nunca quedan en el notebook
-    #   2) archivo ~/.kaggle/kaggle.json
-    #   3) diálogo de subida (solo funciona en la interfaz web de Colab)
-    try:
-        from google.colab import userdata
-        for key in ("KAGGLE_USERNAME", "KAGGLE_KEY"):
-            value = userdata.get(key)
-            if value:
-                os.environ[key] = value
-        if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
-            print("Credenciales de Kaggle tomadas de los Secretos de Colab.")
-            return True
-    except Exception as exc:
-        print("Secretos de Colab no disponibles:", exc)
-
-    cred = Path.home() / ".kaggle" / "kaggle.json"
-    if cred.exists():
-        print("Credenciales de Kaggle encontradas en", cred)
-        return True
-
-    print("No hay kaggle.json. Abriendo diálogo de subida...")
-    try:
-        from google.colab import files
-        uploaded = files.upload()
-        if "kaggle.json" in uploaded:
-            cred.parent.mkdir(parents=True, exist_ok=True)
-            cred.write_bytes(uploaded["kaggle.json"])
-            os.chmod(cred, 0o600)
-            print("kaggle.json guardado en", cred)
-            return True
-        print("No se subió kaggle.json.")
-    except Exception as exc:
-        print("No se pudo subir kaggle.json:", exc)
-    return False
+def filename_to_class(filename):
+    name = os.path.splitext(filename)[0]
+    prefix = re.sub(r"\d+$", "", name)
+    assert prefix in CLASS_MAP, f"Clase desconocida: {filename} (prefijo: {prefix})"
+    return CLASS_MAP[prefix]
 
 
-def find_split_dirs(root: Path) -> dict:
-    # Busca carpetas cuyo nombre sea train/valid/test en cualquier nivel.
-    aliases = {
-        "train": {"train", "training", "entrenamiento"},
-        "valid": {"valid", "validation", "val", "dev", "validacion", "validación"},
-        "test":  {"test", "testing", "prueba"},
-    }
-    found = {}
-    for path in sorted(root.rglob("*")):
-        if path.is_dir():
-            name = path.name.lower()
-            for split, names in aliases.items():
-                if name in names and split not in found:
-                    found[split] = path
-    return found
+def list_images_and_labels(split_name):
+    folder = DATA_ROOT / SPLITS[split_name] / "images"
+    paths, labels = [], []
+    for p in sorted(folder.iterdir()):
+        if p.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+            paths.append(str(p))
+            labels.append(filename_to_class(p.name))
+    return paths, labels
 
 
-def download_dataset() -> None:
-    if DATA_ROOT.exists() and (DATA_ROOT / "train").exists():
-        print("El dataset ya está en", DATA_ROOT)
-        return
-
-    if not ensure_kaggle_credentials():
-        raise RuntimeError("Sin credenciales de Kaggle no se puede descargar el dataset.")
-
-    source = None
-    try:
-        import kagglehub
-        source = Path(kagglehub.dataset_download(KAGGLE_DATASET))
-        print("kagglehub descargó en:", source)
-    except Exception as exc:
-        print("kagglehub falló, se intenta el CLI:", exc)
-        DATA_ROOT.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["kaggle", "datasets", "download", "-d", KAGGLE_DATASET,
-             "-p", str(DATA_ROOT), "--unzip"],
-            check=True,
-        )
-        source = DATA_ROOT
-
-    splits = find_split_dirs(source)
-    if not splits:
-        raise RuntimeError(f"No se encontraron carpetas train/valid/test dentro de {source}")
-
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    for split, path in splits.items():
-        dest = DATA_ROOT / split
-        if dest.exists() or dest.is_symlink():
-            continue
-        try:
-            dest.symlink_to(path, target_is_directory=True)
-        except Exception:
-            shutil.copytree(path, dest)
-        print(f"  {split:5s} -> {path}")
-
-    if (DATA_ROOT / "valid").exists() and not (DATA_ROOT / "dev").exists():
-        (DATA_ROOT / "dev").symlink_to(DATA_ROOT / "valid", target_is_directory=True)
-
-
-download_dataset()
-
-# Estructura resultante (2 niveles)
+# Verificar conteos
 for split in ["train", "valid", "test"]:
-    folder = DATA_ROOT / split
-    if folder.exists():
-        classes = sorted([p.name for p in folder.iterdir() if p.is_dir()])
-        print(f"{split:5s}: {len(classes)} clases -> {classes}")
-"""
-)
+    paths, labels = list_images_and_labels(split)
+    from collections import Counter
+    c = Counter(labels)
+    print(f"{split:5s}: {len(paths)} imágenes, {len(c)} clases")
+    assert len(paths) > 0
 
-code(
-    r"""
-# ============================================================
-# 1.1 Verificación de la estructura y conteo de imágenes
-# ============================================================
-SUPPORTED = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
-def resolve_class_root(split_dir: Path) -> Path:
-    # Si la partición tiene una sola subcarpeta tipo "images", las clases están dentro.
-    subdirs = [p for p in split_dir.iterdir() if p.is_dir()]
-    if len(subdirs) == 1 and subdirs[0].name.lower() in {"images", "image", "imagenes", "imágenes"}:
-        return subdirs[0]
-    return split_dir
-
-
-def count_images(folder: Path) -> dict:
-    counts = {}
-    if not folder.exists():
-        return counts
-    folder = resolve_class_root(folder)
-    for class_dir in sorted(p for p in folder.iterdir() if p.is_dir()):
-        n = sum(1 for f in class_dir.rglob("*") if f.suffix.lower() in SUPPORTED)
-        counts[class_dir.name] = n
-    return counts
-
-
-COUNTS = {split: count_images(DATA_ROOT / split) for split in ["train", "valid", "test"]}
-for split, counts in COUNTS.items():
-    print(f"{split:5s}: {sum(counts.values()):6d} imágenes en {len(counts)} clases")
-
-CLASS_NAMES = sorted(COUNTS["train"].keys())
-assert len(CLASS_NAMES) == NUM_CLASSES, f"Se esperaban {NUM_CLASSES} clases, hay {len(CLASS_NAMES)}"
-
-# Comprobación de consistencia entre particiones
-for split in ["valid", "test"]:
-    assert sorted(COUNTS[split].keys()) == CLASS_NAMES, f"Clases distintas en {split}"
-
-balance = pd.DataFrame(COUNTS).rename_axis("clase").reset_index()
-balance["total"] = balance[["train", "valid", "test"]].sum(axis=1)
-display(balance)
 print("\nClases:", CLASS_NAMES)
 """
 )
@@ -398,50 +345,57 @@ md(
     r"""
 ## 2. Análisis exploratorio
 
-Antes de modelar conviene mirar los datos: distribución de clases, tamaños y ejemplos.
-El dataset es sintético y balanceado (7 000 imágenes de train por clase), lo que elimina
-la necesidad de *class weighting*, pero **no** elimina el riesgo de sobreajustar texturas.
+Distribución de clases (balanceada: 7 000 por clase en train) y ejemplos visuales.
 """
 )
 
 code(
     r"""
 # ============================================================
-# 2. Distribución de clases y ejemplos
+# 2. Distribución de clases
 # ============================================================
+from collections import Counter
+import pandas as pd
+
+COUNTS = {}
+for split in ["train", "valid", "test"]:
+    paths, labels = list_images_and_labels(split)
+    COUNTS[split] = {CLASS_NAMES[i]: sum(1 for l in labels if l == i) for i in range(NUM_CLASSES)}
+
+balance = pd.DataFrame(COUNTS).rename_axis("clase").reset_index()
+balance["total"] = balance[["train", "valid", "test"]].sum(axis=1)
+display(balance)
+
 fig, ax = plt.subplots(figsize=(11, 4))
 balance.set_index("clase")[["train", "valid", "test"]].plot(
     kind="bar", ax=ax, color=["#4C72B0", "#55A868", "#C44E52"], width=0.8
 )
 ax.set_title("Distribución de imágenes por clase y partición")
 ax.set_ylabel("N.º de imágenes")
-ax.set_xlabel("")
 ax.tick_params(axis="x", rotation=30)
 ax.legend(title="Partición")
 plt.tight_layout()
 plt.show()
-
-# Tamaños reales de las imágenes (muestra)
-from PIL import Image
-sample_paths = [p for p in (DATA_ROOT / "train").rglob("*") if p.suffix.lower() in SUPPORTED][:200]
-sizes = Counter(Image.open(p).size for p in sample_paths)
-print("Tamaños encontrados en una muestra de 200 imágenes:", dict(sizes))
 """
 )
 
 code(
     r"""
 # ============================================================
-# 2.1 Galería de ejemplos (3 por clase)
+# 2.1 Galería de ejemplos (2 por clase)
 # ============================================================
-fig, axes = plt.subplots(NUM_CLASSES, 3, figsize=(7, 2.2 * NUM_CLASSES))
+from PIL import Image
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(NUM_CLASSES, 2, figsize=(5, 2.2 * NUM_CLASSES))
 for row, class_name in enumerate(CLASS_NAMES):
-    class_dir = DATA_ROOT / "train" / class_name
-    files = sorted([f for f in class_dir.iterdir() if f.suffix.lower() in SUPPORTED])[:3]
-    for col in range(3):
+    prefix = class_name.replace(" ", "_")
+    class_imgs = [p for p in (DATA_ROOT / "Train_Dataset" / "images").iterdir()
+                  if p.name.startswith(prefix)][:2]
+    for col in range(2):
         ax = axes[row, col]
-        if col < len(files):
-            ax.imshow(Image.open(files[col]).convert("RGB"))
+        if col < len(class_imgs):
+            ax.imshow(Image.open(class_imgs[col]).convert("RGB"))
         ax.axis("off")
         if col == 0:
             ax.set_title(class_name, loc="left", fontsize=9)
@@ -462,16 +416,21 @@ El dataset ya trae tres particiones. Las mapeamos a la nomenclatura de Ng:
 
 | Partición del dataset | Rol | Tamaño |
 |---|---|---|
-| `train` | entrenamiento | 70 000 |
-| `valid` | **dev** (decisiones, hiperparámetros) | 10 000 |
-| `test` | **test** (evaluación final, una sola vez) | 20 000 |
+| `Train_Dataset` | entrenamiento | 70 000 |
+| `Valid_Dataset` | **dev** (decisiones, hiperparámetros) | 10 000 |
+| `Test_Dataset` | **test** (evaluación final, una sola vez) | 20 000 |
+
+> **Principios de Ng aplicados (caps. 5-12):** dev y test provienen de la
+> misma distribución (cap. 6); dev de 10 000 ejemplos permite detectar mejoras
+> del 0.1 % (cap. 7); se usa una métrica única para decidir (caps. 8-9); el test
+> no se toca hasta el final (cap. 11).
 
 **Decisiones del pipeline**
 
-* `image_dataset_from_directory` sin batching → permite aumentar imagen por imagen.
+* Las imágenes están en una carpeta plana; la etiqueta se extrae del nombre del archivo.
 * **Data augmentation** solo en train: volteo horizontal, recorte aleatorio (85–100 % del área)
   con reescalado, y jitter de brillo, contraste y saturación.
-* Cada arquitectura usa su propio `preprocess_input` (VGG y ResNet lo necesitan).
+* Cada arquitectura usa su propio `preprocess_input`.
 * `prefetch` + `num_parallel_calls` para que la GPU no espere a la CPU.
 """
 )
@@ -479,41 +438,20 @@ El dataset ya trae tres particiones. Las mapeamos a la nomenclatura de Ng:
 code(
     r"""
 # ============================================================
-# 3. Pipeline de datos
+# 3. Pipeline de datos (estructura plana)
 # ============================================================
-def make_raw_dataset(directory, class_names, shuffle):
-    # Dataset sin batchear: una imagen (224,224,3) en [0,255] y etiqueta one-hot.
-    return keras.utils.image_dataset_from_directory(
-        resolve_class_root(Path(directory)),
-        labels="inferred",
-        label_mode="categorical",
-        class_names=class_names,
-        color_mode="rgb",
-        batch_size=None,
-        image_size=(IMG_SIZE, IMG_SIZE),
-        shuffle=shuffle,
-        seed=SEED if shuffle else None,
-        interpolation="bilinear",
-    )
-
+AUTOTUNE = tf.data.AUTOTUNE
 
 def augment_single(image, label):
-    # Augmentation geométrica + fotométrica sobre UNA imagen en [0,255].
     image = tf.image.random_flip_left_right(image)
-
     scale = tf.random.uniform([], 0.85, 1.0)
     new_size = tf.cast(tf.cast(IMG_SIZE, tf.float32) * scale, tf.int32)
     image = tf.image.random_crop(image, [new_size, new_size, 3])
     image = tf.image.resize(image, [IMG_SIZE, IMG_SIZE])
-
     image = tf.image.random_brightness(image, max_delta=25.0)
     image = tf.image.random_contrast(image, lower=0.85, upper=1.15)
     image = tf.image.random_saturation(image, lower=0.90, upper=1.10)
     image = tf.clip_by_value(image, 0.0, 255.0)
-    return image, label
-
-
-def preprocess_identity(image, label):
     return image, label
 
 
@@ -529,38 +467,57 @@ def preprocess_scratch(image, label):
     return image / 255.0, label
 
 
-def build_pipeline(directory, class_names, preprocess_fn, training=False, fast=False):
-    ds = make_raw_dataset(directory, class_names, shuffle=training)
+def load_image(path, label):
+    img = tf.io.read_file(path)
+    img = tf.image.decode_jpeg(img, channels=3)
+    img = tf.cast(img, tf.float32)
+    img = tf.image.resize(img, [IMG_SIZE, IMG_SIZE])
+    return img, tf.one_hot(label, NUM_CLASSES)
+
+
+def build_flat_pipeline(split_name, preprocess_fn, training=False, fast=False):
+    paths, labels = list_images_and_labels(split_name)
+    if fast and training:
+        n = int(len(paths) * FAST_FRAC)
+        paths = paths[:n]
+        labels = labels[:n]
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
     if training:
-        ds = ds.map(augment_single, num_parallel_calls=AUTOTUNE)
-        if fast:
-            ds = ds.take(int(FAST_FRAC * 70000))
-    ds = ds.map(preprocess_fn, num_parallel_calls=AUTOTUNE)
+        ds = ds.shuffle(len(paths), seed=SEED)
+
+    def _map(path, label):
+        img, onehot = load_image(path, label)
+        if training:
+            img, onehot = augment_single(img, onehot)
+        img, onehot = preprocess_fn(img, onehot)
+        return img, onehot
+
+    ds = ds.map(_map, num_parallel_calls=AUTOTUNE)
     ds = ds.batch(BATCH_SIZE).prefetch(AUTOTUNE)
     return ds
 
 
-# Rutas de test (se conservan para el análisis de errores)
-raw_test = make_raw_dataset(DATA_ROOT / "test", CLASS_NAMES, shuffle=False)
-TEST_PATHS = list(raw_test.file_paths)
+# Construir los 3 pipelines
+train_vgg = build_flat_pipeline("train", preprocess_vgg, training=True, fast=FAST_DEV_RUN)
+dev_vgg   = build_flat_pipeline("valid", preprocess_vgg)
+test_vgg  = build_flat_pipeline("test", preprocess_vgg)
 
-# Un pipeline por preprocesamiento
-train_vgg = build_pipeline(DATA_ROOT / "train", CLASS_NAMES, preprocess_vgg, training=True, fast=FAST_DEV_RUN)
-dev_vgg   = build_pipeline(DATA_ROOT / "valid", CLASS_NAMES, preprocess_vgg)
-test_vgg  = raw_test.map(preprocess_vgg, num_parallel_calls=AUTOTUNE).batch(BATCH_SIZE).prefetch(AUTOTUNE)
+train_res = build_flat_pipeline("train", preprocess_resnet, training=True, fast=FAST_DEV_RUN)
+dev_res   = build_flat_pipeline("valid", preprocess_resnet)
+test_res  = build_flat_pipeline("test", preprocess_resnet)
 
-train_res = build_pipeline(DATA_ROOT / "train", CLASS_NAMES, preprocess_resnet, training=True, fast=FAST_DEV_RUN)
-dev_res   = build_pipeline(DATA_ROOT / "valid", CLASS_NAMES, preprocess_resnet)
-test_res  = raw_test.map(preprocess_resnet, num_parallel_calls=AUTOTUNE).batch(BATCH_SIZE).prefetch(AUTOTUNE)
+train_scr = build_flat_pipeline("train", preprocess_scratch, training=True, fast=FAST_DEV_RUN)
+dev_scr   = build_flat_pipeline("valid", preprocess_scratch)
+test_scr  = build_flat_pipeline("test", preprocess_scratch)
 
-train_scr = build_pipeline(DATA_ROOT / "train", CLASS_NAMES, preprocess_scratch, training=True, fast=FAST_DEV_RUN)
-dev_scr   = build_pipeline(DATA_ROOT / "valid", CLASS_NAMES, preprocess_scratch)
-test_scr  = raw_test.map(preprocess_scratch, num_parallel_calls=AUTOTUNE).batch(BATCH_SIZE).prefetch(AUTOTUNE)
+# Pipelines sin augmentation (para error de train, estilo Ng)
+train_eval_vgg = build_flat_pipeline("train", preprocess_vgg, training=False, fast=FAST_DEV_RUN)
+train_eval_res = build_flat_pipeline("train", preprocess_resnet, training=False, fast=FAST_DEV_RUN)
+train_eval_scr = build_flat_pipeline("train", preprocess_scratch, training=False, fast=FAST_DEV_RUN)
 
-# Versiones SIN augmentation de train (para medir el error de train real, como en Ng)
-train_eval_vgg = build_pipeline(DATA_ROOT / "train", CLASS_NAMES, preprocess_vgg, training=False, fast=FAST_DEV_RUN)
-train_eval_res = build_pipeline(DATA_ROOT / "train", CLASS_NAMES, preprocess_resnet, training=False, fast=FAST_DEV_RUN)
-train_eval_scr = build_pipeline(DATA_ROOT / "train", CLASS_NAMES, preprocess_scratch, training=False, fast=FAST_DEV_RUN)
+# TEST_PATHS para galería de errores
+test_paths, _ = list_images_and_labels("test")
+TEST_PATHS = test_paths
 
 print("Lotes por época:")
 print("  train VGG   :", len(train_vgg))
@@ -577,14 +534,18 @@ code(
 # 3.1 Verificación visual del augmentation
 # ============================================================
 def show_augmented_examples(n=6):
-    ds = make_raw_dataset(DATA_ROOT / "train", CLASS_NAMES, shuffle=True).take(n)
+    paths, labels = list_images_and_labels("train")
     fig, axes = plt.subplots(2, n, figsize=(2.2 * n, 4.8))
-    for i, (image, label) in enumerate(ds):
-        axes[0, i].imshow(image.numpy().astype("uint8"))
-        axes[0, i].set_title(CLASS_NAMES[int(tf.argmax(label))], fontsize=8)
+    for i in range(n):
+        img = tf.io.read_file(paths[i])
+        img = tf.image.decode_jpeg(img, channels=3)
+        img = tf.cast(img, tf.float32)
+        img = tf.image.resize(img, [IMG_SIZE, IMG_SIZE])
+        axes[0, i].imshow(tf.cast(img, tf.uint8).numpy())
+        axes[0, i].set_title(CLASS_NAMES[labels[i]], fontsize=8)
         axes[0, i].axis("off")
 
-        aug, _ = augment_single(tf.cast(image, tf.float32), label)
+        aug, _ = augment_single(img, tf.one_hot(labels[i], NUM_CLASSES))
         axes[1, i].imshow(tf.cast(tf.clip_by_value(aug, 0, 255), tf.uint8).numpy())
         axes[1, i].set_title("aumentada", fontsize=8)
         axes[1, i].axis("off")
@@ -614,7 +575,7 @@ code(
 # ============================================================
 # 4. Utilidades
 # ============================================================
-RESULTS = {}   # nombre -> dict con métricas y predicciones
+RESULTS = {}
 
 
 def make_callbacks(name, patience=2):
@@ -650,7 +611,6 @@ def plot_history(history, title):
 
 
 def evaluate_model(model, dataset, name, store=True):
-    # Evalúa en un dataset y devuelve un dict con las métricas principales.
     t0 = time.time()
     y_prob = model.predict(dataset, verbose=0)
     y_pred = np.argmax(y_prob, axis=1)
@@ -696,32 +656,47 @@ def evaluate_model(model, dataset, name, store=True):
     return result
 
 
-def bias_variance_report(model, name, train_ds, dev_ds, sample_train=10000):
-    # Compara error de train (muestreado) con error de dev y emite un diagnóstico.
+def bias_variance_report(model, name, train_ds, dev_ds, sample_train=10000,
+                          optimal_error=OPTIMAL_ERROR_RATE):
     train_sample = train_ds.unbatch().take(sample_train).batch(BATCH_SIZE)
     tr_loss, tr_acc = model.evaluate(train_sample, verbose=0)
     dv_loss, dv_acc = model.evaluate(dev_ds, verbose=0)
 
-    tr_err, dv_err = 1 - tr_acc, 1 - dv_acc
-    gap = dv_err - tr_err
+    tr_err = 1 - tr_acc
+    dv_err = 1 - dv_acc
+    avoidable_bias = max(0.0, tr_err - optimal_error)
+    variance = max(0.0, dv_err - tr_err)
+    total_err = dv_err
 
-    if tr_err > 0.10:
-        verdict = "SESGO ALTO (bias): el modelo no ajusta ni siquiera el train."
-        action = "Aumentar capacidad, entrenar más épocas o mejorar las features."
-    elif gap > 0.05:
+    if avoidable_bias > 0.05 and avoidable_bias >= variance:
+        verdict = "SESGO ALTO (avoidable bias): no ajusta bien ni el train."
+        action = ("Ng cap.25: aumentar capacidad (mas capas/neuronas), reducir regularizacion, "
+                  "mejorar features segun error analysis, o cambiar arquitectura.")
+    elif variance > 0.05 and variance > avoidable_bias:
         verdict = "VARIANZA ALTA (overfitting): gran brecha train-dev."
-        action = "Más regularización/augmentation o más datos."
+        action = ("Ng cap.27: mas datos, regularizacion (L2/dropout), early stopping, "
+                  "o data augmentation mas agresiva.")
+    elif total_err <= optimal_error + 0.02:
+        verdict = "BUEN AJUSTE: cerca del error optimo."
+        action = "El cuello de botella esta en los datos o en el techo del modelo."
     else:
-        verdict = "BUEN AJUSTE: error de train bajo y brecha train-dev pequeña."
-        action = "El cuello de botella está en el techo del modelo o en los datos."
+        verdict = "AJUSTE RAZONABLE: bias y varianza moderados."
+        action = "Mejorar features o revisar la distribucion de los datos."
 
-    print(f"{name}: train_acc={tr_acc:.4f} | dev_acc={dv_acc:.4f} | "
-          f"gap={gap:+.4f}")
-    print("  ->", verdict)
-    print("  ->", action)
+    print(f"{name}:")
+    print(f"   error optimo (human-level) : {optimal_error:.4f}")
+    print(f"   train_acc / train_err      : {tr_acc:.4f} / {tr_err:.4f}")
+    print(f"   dev_acc   / dev_err       : {dv_acc:.4f} / {dv_err:.4f}")
+    print(f"   avoidable bias            : {avoidable_bias:.4f}")
+    print(f"   variance                  : {variance:.4f}")
+    print(f"   -> {verdict}")
+    print(f"   -> {action}")
 
-    return {"modelo": name, "train_acc": tr_acc, "dev_acc": dv_acc,
-            "train_err": tr_err, "dev_err": dv_err, "gap": gap, "diagnostico": verdict}
+    return {"modelo": name, "optimal_error": optimal_error,
+            "train_acc": tr_acc, "dev_acc": dv_acc,
+            "train_err": tr_err, "dev_err": dv_err,
+            "avoidable_bias": avoidable_bias, "variance": variance,
+            "diagnostico": verdict, "accion": action}
 """
 )
 
@@ -734,8 +709,6 @@ md(
 
 Búsqueda pequeña y honesta: 2 valores de dropout × 2 learning rates, 3 épocas cada una,
 sobre el 20 % de train. Se elige por `val_accuracy` (dev), nunca por test.
-
-Esto es exactamente el ciclo de Ng: proponer configuración → medir en dev → quedarse con la mejor.
 """
 )
 
@@ -821,9 +794,6 @@ md(
 
 VGG16 preentrenado en ImageNet. Congelamos **toda** la base convolucional y entrenamos
 una cabeza nueva (GAP → 512 → 256 → softmax) con dropout, L2 y label smoothing.
-
-Con la base congelada, el modelo aprende a *reutilizar* los detectores de bordes, texturas y
-formas de ImageNet; el ajuste fino del último bloque se hace después, con un learning rate bajo.
 """
 )
 
@@ -871,11 +841,7 @@ md(
     r"""
 ## 7. Modelo A+ — Fine-tuning del último bloque
 
-Descongelamos `block5` (las capas convolucionales de mayor nivel) y reentrenamos con
-`lr = 1e-5`. Es el paso opcional que propone el enunciado: adaptar los filtros de alto nivel
-a las texturas metálicas del dataset sin destruir lo aprendido en ImageNet.
-
-Se recompila con un learning rate bajo; si no, el fine-tuning borra los pesos preentrenados.
+Descongelamos `block5` y reentrenamos con `lr = 1e-5`.
 """
 )
 
@@ -922,12 +888,7 @@ md(
     r"""
 ## 8. Modelo B — Transfer learning con ResNet50V2
 
-Segunda arquitectura preentrenada. ResNet50V2 introduce conexiones residuales y
-*pre-activation*, lo que facilita entrenar redes profundas y suele generalizar mejor que VGG
-con menos parámetros efectivos.
-
-Se mantiene la misma receta (base congelada + cabeza + augmentation + callbacks) para que la
-comparación sean manzanas con manzanas.
+Segunda arquitectura preentrenada. Misma receta (base congelada + cabeza + augmentation).
 """
 )
 
@@ -988,12 +949,7 @@ md(
     r"""
 ## 9. Modelo C — CNN desde cero
 
-Red propia sin pesos preentrenados: cuatro bloques `Conv-BN-ReLU ×2 + MaxPool`,
-con dropout creciente y `GlobalAveragePooling`. Es el *baseline* honesto: si el transfer
-learning no le gana claramente, hay que preguntarse si el dataset es demasiado fácil o
-si las features de ImageNet no aportan.
-
-Se entrena con la misma augmentation y los mismos callbacks.
+Red propia sin pesos preentrenados: cuatro bloques `Conv-BN-ReLU ×2 + MaxPool`.
 """
 )
 
@@ -1063,14 +1019,8 @@ md(
     r"""
 ## 10. Curvas de aprendizaje: sesgo vs. varianza
 
-Para diagnosticar de verdad hace falta ver cómo evolucionan los errores al crecer el conjunto
-de entrenamiento. Reentrenamos la cabeza de VGG16 (base congelada) con fracciones
+Reentrenamos la cabeza de VGG16 (base congelada) con fracciones
 10 %, 25 %, 50 % y 100 % de train, 3 épocas cada vez.
-
-Lectura esperada:
-
-* **Curvas que convergen a un error alto** → sesgo alto (el modelo se queda corto).
-* **Brecha grande y persistente entre train y dev** → varianza alta (hace falta más datos o regularización).
 """
 )
 
@@ -1081,9 +1031,9 @@ code(
 # ============================================================
 def learning_curve(fractions=(0.10, 0.25, 0.50, 1.00), epochs=3):
     rows = []
-    total_steps = len(train_vgg)
+    total = len(train_vgg)
     for frac in fractions:
-        steps = max(1, int(total_steps * frac))
+        steps = max(1, int(total * frac))
         print(f"\n>>> Fracción {frac:.0%} ({steps} lotes)")
         keras.utils.set_random_seed(SEED)
         model = build_vgg16_model(dropout=BEST_DROPOUT, lr=BEST_LR,
@@ -1124,8 +1074,10 @@ md(
     r"""
 ## 11. Evaluación final en test y comparación
 
-Aquí —y solo aquí— se usa el conjunto de test. La tabla resume las métricas de los cuatro
-modelos evaluados (tres estrategias + la variante con fine-tuning).
+### 11.0 Métrica única de evaluación (Ng caps. 8-9)
+
+**Métrica a optimizar (optimizing):** F1 macro.
+**Métrica satisfactoria (satisficing):** accuracy ≥ 0.90 y top-3 ≥ 0.99.
 """
 )
 
@@ -1149,7 +1101,6 @@ display(comparison.style.format({
 
 comparison.to_csv(OUT_DIR / "comparacion_modelos.csv", index=False)
 
-# Gráfico de barras comparativo
 fig, ax = plt.subplots(figsize=(9, 4))
 comparison.set_index("modelo")[["accuracy", "f1_macro"]].plot(
     kind="bar", ax=ax, color=["#4C72B0", "#DD8452"]
@@ -1188,7 +1139,6 @@ for ax in axes[n_models:]:
     ax.axis("off")
 plt.tight_layout(); plt.show()
 
-# Reporte por clase del mejor modelo
 best_name = comparison.iloc[0]["modelo"]
 best = RESULTS[best_name]
 print(f"\nReporte por clase — {best_name}\n")
@@ -1204,20 +1154,81 @@ md(
     r"""
 ## 12. Análisis de errores
 
-El análisis de errores de Ng: mirar los fallos uno por uno, agruparlos y decidir qué
-haría más daño corregir. Aquí:
+### 12.0 Análisis de errores sobre **dev** (priorización)
 
-1. los pares de clases más confundidos;
-2. una galería de imágenes mal clasificadas con su confianza;
-3. la distribución de confianza (aciertos vs. errores);
-4. la accuracy por clase, para detectar clases sistemáticamente débiles.
+Siguiendo a Ng (caps. 14-19), el análisis de errores se hace sobre el **dev set** para
+priorizar qué arreglar; el test set se reserva para la estimación final sin sesgo.
+
+* **Error óptimo (human-level)** ≈ 0 % para estas piezas.
+* **Avoidable bias** = error_train − error_óptimo; **variance** = error_dev − error_train.
+* **Eyeball dev set vs Blackbox dev set** (caps. 17-18).
+* **Ceiling (techo) de cada categoría** (cap. 14).
+* **Análisis de errores en train** (cap. 26) para modelos con sesgo alto.
 """
 )
 
 code(
     r"""
 # ============================================================
-# 12. Análisis de errores del mejor modelo
+# 12.0 Análisis de errores en dev (priorización)
+# ============================================================
+model_map = {"A · VGG16 (base congelada)": vgg_model,
+             "A+ · VGG16 + fine-tuning": vgg_model,
+             "B · ResNet50V2": res_model,
+             "C · CNN desde cero": cnn_model}
+ds_map = {"A · VGG16 (base congelada)": dev_vgg,
+          "A+ · VGG16 + fine-tuning": dev_vgg,
+          "B · ResNet50V2": dev_res,
+          "C · CNN desde cero": dev_scr}
+
+best_dev_result = evaluate_model(model_map[best_name], ds_map[best_name],
+                                f"{best_name} (dev)", store=False)
+
+dev_cm = confusion_matrix(best_dev_result["y_true"], best_dev_result["y_pred"])
+dev_total_errors = int((best_dev_result["y_pred"] != best_dev_result["y_true"]).sum())
+dev_rows = []
+for i in range(NUM_CLASSES):
+    for j in range(NUM_CLASSES):
+        if i != j and dev_cm[i, j] > 0:
+            dev_rows.append({
+                "real": CLASS_NAMES[i],
+                "predicho": CLASS_NAMES[j],
+                "n": int(dev_cm[i, j]),
+                "ceiling_pct": 100 * dev_cm[i, j] / max(1, dev_total_errors),
+            })
+dev_pairs = pd.DataFrame(dev_rows).sort_values("n", ascending=False).reset_index(drop=True)
+print(f"\nErrores totales en dev: {dev_total_errors}")
+if len(dev_pairs) > 0:
+    print(f"Ceiling si se arregla el par #1: {dev_pairs.iloc[0]['ceiling_pct']:.1f}% del error")
+display(dev_pairs.head(10))
+
+# Error por clase en train (Ng cap. 26)
+train_ds_map = {"A · VGG16 (base congelada)": train_eval_vgg,
+                "A+ · VGG16 + fine-tuning": train_eval_vgg,
+                "B · ResNet50V2": train_eval_res,
+                "C · CNN desde cero": train_eval_scr}
+train_res_eval = evaluate_model(model_map[best_name], train_ds_map[best_name],
+                               f"{best_name} (train)", store=False)
+train_cm = confusion_matrix(train_res_eval["y_true"], train_res_eval["y_pred"], normalize="true")
+train_per_class = pd.DataFrame({
+    "clase": CLASS_NAMES,
+    "train_accuracy": train_cm.diagonal(),
+}).sort_values("train_accuracy")
+print("\nError por clase en train (Ng cap. 26):")
+display(train_per_class)
+
+print("\nEyeball/Blackbox dev sets (Ng caps. 17-18):")
+print(f"  dev total       : {len(best_dev_result['y_true'])} ejemplos")
+print(f"  errores en dev  : {dev_total_errors}")
+print(f"  Eyeball sugerido: ~2000 ejemplos")
+print(f"  Blackbox sugerido: resto")
+"""
+)
+
+code(
+    r"""
+# ============================================================
+# 12. Análisis de errores del mejor modelo (test)
 # ============================================================
 def confusion_pairs(result, top=8):
     cm = confusion_matrix(result["y_true"], result["y_pred"])
@@ -1225,11 +1236,8 @@ def confusion_pairs(result, top=8):
     for i in range(NUM_CLASSES):
         for j in range(NUM_CLASSES):
             if i != j and cm[i, j] > 0:
-                rows.append({
-                    "real": CLASS_NAMES[i],
-                    "predicho": CLASS_NAMES[j],
-                    "n": int(cm[i, j]),
-                })
+                rows.append({"real": CLASS_NAMES[i], "predicho": CLASS_NAMES[j],
+                             "n": int(cm[i, j])})
     return pd.DataFrame(rows).sort_values("n", ascending=False).head(top).reset_index(drop=True)
 
 
@@ -1237,7 +1245,6 @@ pairs = confusion_pairs(best)
 print(f"Pares más confundidos — {best_name}")
 display(pairs)
 
-# Accuracy por clase
 cm = confusion_matrix(best["y_true"], best["y_pred"], normalize="true")
 per_class = pd.DataFrame({
     "clase": CLASS_NAMES,
@@ -1250,7 +1257,6 @@ sns.barplot(data=per_class, x="accuracy", y="clase", hue="clase", palette="virid
 plt.xlim(0, 1.05)
 plt.title(f"Accuracy por clase — {best_name}")
 plt.tight_layout(); plt.show()
-
 display(per_class)
 """
 )
@@ -1297,19 +1303,9 @@ def show_errors(result, paths, n=12, correct=False):
 
 print("Errores más confiados:")
 _ = show_errors(best, TEST_PATHS, n=12, correct=False)
-print("Aciertos más confiados:")
-_ = show_errors(best, TEST_PATHS, n=8, correct=True)
-"""
-)
 
-code(
-    r"""
-# ============================================================
-# 12.2 Confianza: aciertos vs. errores
-# ============================================================
 conf = best["y_prob"].max(axis=1)
 is_correct = best["y_pred"] == best["y_true"]
-
 plt.figure(figsize=(8, 4))
 plt.hist(conf[is_correct], bins=40, alpha=0.65, label="aciertos", color="#55A868")
 plt.hist(conf[~is_correct], bins=40, alpha=0.85, label="errores", color="#C44E52")
@@ -1334,46 +1330,43 @@ md(
 
 ### Qué se espera observar
 
-* **Transfer learning > desde cero** en accuracy y, sobre todo, en eficiencia de datos:
-  VGG16 y ResNet50V2 parten de filtros que ya detectan bordes, esquinas y texturas.
-* **El fine-tuning** suele mejorar la precisión en las clases visualmente parecidas
-  (por ejemplo *engine part cooler round* vs. *square*), porque adapta los filtros de alto
-  nivel al acabado metálico sintético del dataset.
-* **La CNN desde cero** necesita muchas más épocas y tiende a sobreajustar antes; su brecha
-  train-dev suele ser la más grande. Aun así, es el control que demuestra el valor del
-  preentrenamiento.
+* **Transfer learning > desde cero** en accuracy y eficiencia de datos.
+* **El fine-tuning** suele mejorar la precisión en clases visualmente parecidas.
+* **La CNN desde cero** necesita más épocas y tiende a sobreajustar antes.
 
 ### Lectura de sesgo y varianza
 
-* Si el error de train es bajo y la brecha train-dev es grande → **varianza alta**:
-  más augmentación, dropout más agresivo o más datos.
-* Si train y dev son altos y cercanos → **sesgo alto**: hace falta más capacidad o mejores
-  features. La curva de aprendizaje permite distinguir ambos casos al mirar la forma.
+* Si el error de train es bajo y la brecha train-dev es grande → **varianza alta**.
+* Si train y dev son altos y cercanos → **sesgo alto**.
+
+### Playbook de Ng: qué hacer según el diagnóstico
+
+| Diagnóstico (Ng caps. 23, 25, 27) | Acción concreta |
+|---|---|
+| Avoidable bias alto | Aumentar capacidad, reducir regularización, mejorar features, cambiar arquitectura. |
+| Variance alta | Más datos, regularización, early stopping, augmentation más agresiva. |
+| Ambos altos | Aumentar capacidad y regularización a la vez; revisar data mismatch. |
+| Cerca del óptimo | Ensembling o más datos reales de cámara. |
+| Data mismatch (train ≠ cámara real) | Redefinir dev/test con imágenes reales; ponderar datos o síntesis artificial. |
 
 ### Limitaciones honestas
 
-1. **Dataset sintético**: las imágenes provienen de renderizados CAD. Un clasificador con
-   99 % aquí puede degradarse contra una cámara real (dominio distinto).
-2. **Clases semánticamente cercanas**: algunas piezas comparten geometría y solo cambian
-   detalles; la matriz de confusión lo evidencia.
-3. **Presupuesto de cómputo**: se limita el número de épocas y la búsqueda de
-   hiperparámetros; no se hace una búsqueda exhaustiva ni *ensembling*.
-4. **Una sola semilla**: no se reporta media ± desviación sobre varias repeticiones.
-   Es la mejora experimental más clara si hubiera más tiempo.
+1. **Dataset sintético**: las imágenes provienen de renderizados CAD.
+2. **Clases semánticamente cercanas**: algunas piezas comparten geometría.
+3. **Presupuesto de cómputo**: se limita el número de épocas.
+4. **Una sola semilla**: no se reporta media ± desviación.
 
 ### Cuál conviene y por qué
 
 | Criterio | Ganador esperado |
 |---|---|
 | Mejor accuracy absoluta | VGG16 + fine-tuning o ResNet50V2 |
-| Mejor relación accuracy / costo | ResNet50V2 (menos parámetros que VGG16) |
-| Más simple de entrenar | VGG16 congelado (la cabeza es minúscula) |
-| Menor latencia de inferencia | CNN desde cero, si la accuracy alcanza |
+| Mejor relación accuracy / costo | ResNet50V2 |
+| Más simple de entrenar | VGG16 congelado |
+| Menor latencia de inferencia | CNN desde cero |
 
-**Conclusión operativa:** para producción industrial con imágenes nuevas de cámara, conviene
-partir de ResNet50V2 o VGG16 + fine-tuning, con augmentation agresiva y validación cruzada
-con datos reales; el modelo desde cero se justifica solo si hay restricciones de licencia
-o de cómputo en inferencia.
+**Conclusión operativa:** para producción industrial, partir de ResNet50V2 o VGG16 +
+fine-tuning, con augmentation agresiva y validación con datos reales.
 """
 )
 
@@ -1386,7 +1379,7 @@ import datetime as _dt
 
 summary = {
     "fecha": _dt.datetime.now().isoformat(timespec="seconds"),
-    "dataset": KAGGLE_DATASET,
+    "dataset": "beschue/industrial-classification-data-set",
     "clases": CLASS_NAMES,
     "comparacion": comparison.to_dict(orient="records"),
     "mejor_modelo": best_name,
@@ -1395,11 +1388,9 @@ summary = {
 }
 
 def _json_default(obj):
-    # Convierte tipos numpy a tipos nativos para que json.dump no falle.
     if hasattr(obj, "item"):
         return obj.item()
     return str(obj)
-
 
 with open(OUT_DIR / "resumen_resultados.json", "w", encoding="utf-8") as fh:
     json.dump(summary, fh, ensure_ascii=False, indent=2, default=_json_default)
@@ -1413,7 +1404,7 @@ for p in sorted(OUT_DIR.glob("*")):
 code(
     r"""
 # ============================================================
-# 14.1 Descarga del resumen (opcional)
+# 14.1 Descarga del resumen (solo Colab web)
 # ============================================================
 try:
     from google.colab import files as colab_files
@@ -1421,14 +1412,11 @@ try:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(OUT_DIR / "comparacion_modelos.csv", "comparacion_modelos.csv")
         zf.write(OUT_DIR / "resumen_resultados.json", "resumen_resultados.json")
-        # Solo los pesos del mejor modelo (los tres completos pesan demasiado)
-        best_ckpt = OUT_DIR / f"{best_name.split(' ')[-1]}.keras"
         for p in sorted(OUT_DIR.glob("*.keras")):
-            if p.name.startswith(best_name.split(" ")[0]) or p == best_ckpt:
-                zf.write(p, p.name)
+            zf.write(p, p.name)
     colab_files.download(str(zip_path))
 except Exception as exc:
-    print("Descarga omitida:", exc)
+    print("Descarga omitida (no estás en Colab web):", exc)
 """
 )
 

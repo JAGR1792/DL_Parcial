@@ -1,0 +1,21 @@
+﻿# Dataset (too large)
+Parcial 2/data/
+data/
+
+# Virtual environments
+.venv/
+.venv312/
+Parcial 2/.venv312/
+__pycache__/
+*.pyc
+
+# Large files
+*.zip
+*.keras
+*.h5
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PDF book (large binary)
+*.pdf
